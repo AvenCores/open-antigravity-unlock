@@ -1,1 +1,1 @@
-nuitka --onefile --windows-icon-from-ico=icon.ico --windows-uac-admin main.py
+pyinstaller --onefile --uac-admin --icon=icon.ico --name="Open AG Patcher" main.py

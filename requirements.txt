@@ -1,1 +1,1 @@
-nuitka
+pyinstaller

@@ -54,10 +54,10 @@ python main.py "C:\\Program Files\\Antigravity\\resources\\app\\out\\main.js"
 Патчер вносит правки в `main.js`, чтобы убрать проверки внутренних/региональных ограничений и корректно пройти онбординг. Также добавляется безопасный fallback для получения статуса пользователя. Все изменения обратимы через резервную копию.
 
 ## 🛠️ Сборка
-Требуется `nuitka`:
+Требуется `pyinstaller`:
 ```bash
 pip install -r requirements.txt
-nuitka --onefile --windows-icon-from-ico=icon.ico --windows-uac-admin main.py
+pyinstaller --onefile --uac-admin --icon=icon.ico --name="Open AG Patcher" main.py
 ```
 
 ## Структура проекта
