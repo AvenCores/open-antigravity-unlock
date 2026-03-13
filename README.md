@@ -65,7 +65,6 @@ nuitka --onefile --windows-icon-from-ico=icon.ico --windows-uac-admin main.py
 - `requirements.txt` — зависимости для сборки.
 - `build.txt` — пример команды сборки.
 - `icon.ico` — иконка для `exe`.
-- `main.exe` — готовая сборка (если присутствует в репозитории).
 
 # 📜 Лицензия
 
