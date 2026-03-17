@@ -24,7 +24,7 @@
 Опенсорс патчер для Antigravity: снимает регионные ограничения без VPN и смены региона аккаунта Google. Опенсурс аналог утилиты [Antigravity в России без VPN и смены региона аккаунта Google](https://github.com/confeden/Antigravity).
 
 <div align="center">
-  <img width="979" height="512" alt="1" src="https://i127.fastpic.org/big/2026/0315/12/c7f5c0a590f7f9788d9853ba6fc7d412.png" />
+  <img width="979" height="512" alt="1" src="https://github.com/user-attachments/assets/a8db0b3b-9baa-4b71-81e9-63a58a36a4c0" />
 </div>
 
 # 🎦 Видео гайд по установке и решению проблем
