@@ -178,7 +178,8 @@ python main.py /usr/share/antigravity/resources/app/out/main.js
 Требуется `pyinstaller`:
 ```bash
 pip install -r requirements.txt
-pyinstaller --onefile --uac-admin --icon=icon.ico --name="Open AG Patcher" main.py
+Windows: pyinstaller --onefile --uac-admin --icon=icon.ico --name="Open_AG_Patcher_Windows" main.py
+Linux: pyinstaller --onefile --icon=icon.ico --name="Open_AG_Patcher_Linux" main.py
 ```
 
 ## Структура проекта

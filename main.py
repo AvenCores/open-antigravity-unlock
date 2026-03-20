@@ -6,7 +6,7 @@ import time
 import ctypes
 from packaging.version import Version
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 MIN_AG_VERSION = "1.20.5"
 USE_COLOR = False
 
@@ -270,6 +270,26 @@ def save_backup_version(backup_path, version_str):
     except Exception as e:
         print(color(f"  [!] Could not save backup version metadata: {e}", COLOR_YELLOW))
 
+def save_backup_hash(backup_path):
+    h = file_hash(backup_path)
+    if h != "?":
+        try:
+            with open(backup_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write(h)
+        except Exception as e:
+            print(color(f"  [!] Could not save backup hash: {e}", COLOR_YELLOW))
+
+def verify_backup_hash(backup_path):
+    hash_file = backup_path + ".sha256"
+    if not os.path.exists(hash_file):
+        return None  # нет данных — не проверяем
+    try:
+        with open(hash_file, "r", encoding="utf-8") as f:
+            saved = f.read().strip()
+        return file_hash(backup_path) == saved
+    except Exception:
+        return None
+
 def format_bytes(size_bytes):
     if size_bytes >= 1024 * 1024:
         return f"{size_bytes / 1024 / 1024:.1f} MB"
@@ -502,23 +522,37 @@ def do_patch(main_js_path, show_search_line=False):
             print_target_info(main_js_path, show_search_line=show_search_line)
             return
 
-    backup_ok, _ = warn_about_unsafe_backup(main_js_path, installed_version_str=ver_str, current_content=content)
-    if not backup_ok:
-        return
-
     backup_path = main_js_path + ".bak"
-    if not os.path.exists(backup_path):
+
+    need_new_backup = True
+    if os.path.exists(backup_path):
+        backup_size = file_size(backup_path)
+        try:
+            with open(backup_path, "r", encoding="utf-8") as f:
+                backup_content = f.read()
+            backup_looks_empty = backup_size <= 2048 or len(backup_content.strip()) <= 512
+        except Exception:
+            backup_looks_empty = True
+
+        if backup_looks_empty:
+            print(color("  [!] Existing backup looks empty or corrupted — replacing it.", COLOR_YELLOW))
+        elif is_already_patched(backup_content):
+            print(color("  [!] Existing backup is itself patched — replacing it with clean copy.", COLOR_YELLOW))
+        else:
+            need_new_backup = False
+            print("  [i] Backup already exists")
+
+    if need_new_backup:
         print("  [*] Creating backup...")
         try:
             with open(backup_path, "w", encoding="utf-8") as f:
                 f.write(content)
             save_backup_version(backup_path, ver_str)
+            save_backup_hash(backup_path)
             print(f"  [+] Backup: {os.path.basename(backup_path)}")
         except Exception as e:
             print(f"  [!] Backup error: {e}")
             return
-    else:
-        print("  [i] Backup already exists")
 
     hash_before = file_hash(main_js_path)
 
@@ -557,6 +591,8 @@ def do_patch(main_js_path, show_search_line=False):
     print("  Restart Antigravity and sign in.")
 
 def do_restore(main_js_path, show_search_line=False):
+    import shutil
+
     current_content = None
     try:
         with open(main_js_path, "r", encoding="utf-8") as f:
@@ -569,12 +605,34 @@ def do_restore(main_js_path, show_search_line=False):
         return
 
     backup_path = main_js_path + ".bak"
+
+    # Разделяем "не найден" и "нечитаем"
+    if not os.path.exists(backup_path):
+        print(f"  [!] Backup file not found: {backup_path}")
+        return
     try:
         with open(backup_path, "r", encoding="utf-8") as f:
             data = f.read()
     except Exception as e:
-        print(f"  [!] Backup not found: {backup_path}")
+        print(f"  [!] Could not read backup: {e}")
         return
+
+    # Проверка целостности по хэшу
+    hash_ok = verify_backup_hash(backup_path)
+    if hash_ok is False:
+        print(color("  [!] Backup hash mismatch — file may be corrupted!", COLOR_RED))
+        c = prompt_yn("Restore anyway?")
+        if c != 'y':
+            print("  [i] Restore cancelled.")
+            return
+
+    # Предупреждение, если бэкап сам является пропатченной версией
+    if is_already_patched(data):
+        print(color("  [!] Backup itself appears to be patched!", COLOR_YELLOW))
+        c = prompt_yn("Restore this patched backup?")
+        if c != 'y':
+            print("  [i] Restore cancelled.")
+            return
 
     restore_question = "Restore this backup anyway?" if backup_has_warnings else "Restore backup?"
     c = prompt_yn(restore_question)
@@ -582,14 +640,40 @@ def do_restore(main_js_path, show_search_line=False):
         print("  [i] Restore cancelled.")
         return
 
+    hash_before = file_hash(main_js_path)
+
+    # Атомарная запись через временный файл
+    tmp_path = main_js_path + ".tmp"
     try:
-        with open(main_js_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(data)
+        shutil.move(tmp_path, main_js_path)
     except Exception as e:
         print(f"\n  [!] Restore error: {e}")
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
         return
 
+    hash_after = file_hash(main_js_path)
+
+    # Удаляем мета-файлы бэкапа — после восстановления они уже неактуальны
+    for ext in (".version", ".sha256"):
+        meta = backup_path + ext
+        if os.path.exists(meta):
+            try:
+                os.remove(meta)
+            except Exception:
+                pass
+
     print_target_info(main_js_path, show_search_line=show_search_line)
+    print()
+    if hash_before not in ("?",) and hash_before != hash_after:
+        print(f"  [+] Before: {hash_before[:8]}...{hash_before[56:]}")
+        print(f"  [+] After:  {hash_after[:8]}...{hash_after[56:]}")
+    print(f"  [+] Done at {time.strftime('%H:%M:%S')}")
     print("\n  [+] Restored from backup!")
 
 def main():
