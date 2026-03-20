@@ -4,9 +4,10 @@ import re
 import hashlib
 import time
 import ctypes
+import subprocess
 from packaging.version import Version
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 MIN_AG_VERSION = "1.20.5"
 USE_COLOR = False
 
@@ -87,7 +88,9 @@ def run_as_admin():
         args_str = ' '.join([f'"{a}"' for a in sys.argv[1:]])
     else:
         executable = sys.executable
-        args_str = ' '.join([f'"{a}"' for a in sys.argv])
+        # sys.argv[0] — это скрипт; передаём его явно, остальные аргументы следом
+        script = sys.argv[0]
+        args_str = ' '.join([f'"{a}"' for a in [script] + sys.argv[1:]])
     
     try:
         ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, args_str, None, 1)
@@ -155,7 +158,6 @@ def get_ag_version(main_js_path):
     if os.name == 'posix':
         # Сначала пробуем dpkg (apt-установка)
         try:
-            import subprocess
             result = subprocess.run(
                 ["dpkg-query", "-W", "-f=${Version}", "antigravity"],
                 capture_output=True, text=True
@@ -169,7 +171,6 @@ def get_ag_version(main_js_path):
 
         # rpm-based (Fedora, RHEL, openSUSE и др.)
         try:
-            import subprocess
             result = subprocess.run(
                 ["rpm", "-q", "--queryformat", "%{VERSION}", "antigravity"],
                 capture_output=True, text=True
@@ -333,6 +334,9 @@ def warn_about_unsafe_backup(main_js_path, installed_version_str=None, current_c
                 save_backup_version(backup_path, installed_version_str)
         elif not is_already_patched(current_content):
             warnings.append("backup does not match the current unpatched main.js")
+        else:
+            # Текущий файл запатчен, а бэкап отличается — возможно, бэкап от другой версии
+            warnings.append("backup does not match the current (patched) main.js — it may be from a different version")
 
     if not warnings:
         return True, False
@@ -413,16 +417,18 @@ def apply_patches(content):
     # 4. refreshUserStatus wrapper
     re_refresh = re.compile(r'await this\.(([a-zA-Z_$]+\.)?refreshUserStatus\(([a-zA-Z_$]+)\))')
     refresh_matches = list(re_refresh.finditer(content))
-    
+
     if refresh_matches:
         old = content
-        for rm in refresh_matches:
+        # Итерируем в обратном порядке по позициям, чтобы замены не сдвигали
+        # индексы ещё не обработанных совпадений
+        for rm in reversed(refresh_matches):
             full = rm.group(0)
             inner_call = rm.group(1)
             arg_r = rm.group(3)
-
             wrapped = f'await(async()=>{{try{{return await this.{inner_call}}}catch(_e){{return{{settings:{{}},userTier:"pro",oauthTokenInfo:{arg_r}}}}}}})()'
-            content = content.replace(full, wrapped, 1)
+            start, end = rm.start(), rm.end()
+            content = content[:start] + wrapped + content[end:]
 
         results.append({
             "Name": "refreshUserStatus → wrapped with fallback",
@@ -435,7 +441,9 @@ def apply_patches(content):
     return content, results
 
 def is_already_patched(content):
-    return "if(true)" in content and '"antigravity-insiders"' in content
+    # Проверяем конкретные строки, внедрённые патчем, а не просто if(true),
+    # которое слишком часто встречается в минифицированном JS
+    return 'ideName:"antigravity-insiders"' in content and 'onboardUser(' in content
 
 def file_hash(path):
     try:
@@ -480,9 +488,6 @@ def redraw_main_screen(main_js_path, show_search_line=False):
 def do_patch(main_js_path, show_search_line=False):
     # --- Проверка минимальной версии ---
     ver_ok, ver_str = check_ag_version(main_js_path)
-
-    if ver_str is not None:
-        print(f"  [*] Antigravity version: {color(ver_str, COLOR_GREEN)}")
 
     if ver_ok is False:
         # Версия определена, но ниже минимальной
@@ -583,7 +588,7 @@ def do_patch(main_js_path, show_search_line=False):
 
     hash_after = file_hash(main_js_path)
     print(f"  [+] Patches: {applied}/{len(results)} applied")
-    if hash_before != "?":
+    if hash_before != "?" and hash_after != "?":
         print(f"  [+] Before:  {hash_before[:8]}...{hash_before[56:]}")
         print(f"  [+] After:   {hash_after[:8]}...{hash_after[56:]}")
     print(f"  [+] Done at  {time.strftime('%H:%M:%S')}")
@@ -670,7 +675,7 @@ def do_restore(main_js_path, show_search_line=False):
 
     print_target_info(main_js_path, show_search_line=show_search_line)
     print()
-    if hash_before not in ("?",) and hash_before != hash_after:
+    if hash_before not in ("?",) and hash_before != hash_after and hash_after != "?":
         print(f"  [+] Before: {hash_before[:8]}...{hash_before[56:]}")
         print(f"  [+] After:  {hash_after[:8]}...{hash_after[56:]}")
     print(f"  [+] Done at {time.strftime('%H:%M:%S')}")
