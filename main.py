@@ -862,6 +862,7 @@ def main():
 
 
 if __name__ == "__main__":
+    setup_console()
     if os.name == "nt" and not is_admin():
         if run_as_admin():
             sys.exit(0)
