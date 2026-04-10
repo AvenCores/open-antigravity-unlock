@@ -11,8 +11,8 @@ import subprocess
 from enum import Enum
 from packaging.version import Version
 
-VERSION = "1.0.6"
-MIN_AG_VERSION = "1.20.5"
+VERSION = "1.0.7"
+MIN_AG_VERSION = "1.22.2"
 USE_COLOR = False
 
 # Единственное место, где хранится GUID установщика Antigravity
@@ -299,52 +299,8 @@ def parse_version_safe(ver_str):
 
 
 # ---------------------------------------------------------------------------
-# Бэкап: метаданные версии и хэш
+# Бэкап — ТОЛЬКО main.js.bak, без метаданных
 # ---------------------------------------------------------------------------
-
-def load_backup_version(backup_path):
-    meta_path = backup_path + ".version"
-    if not os.path.exists(meta_path):
-        return None
-    try:
-        with open(meta_path, "r", encoding="utf-8") as f:
-            ver_str = f.read().strip()
-        return ver_str or None
-    except Exception:
-        return None
-
-
-def save_backup_version(backup_path, version_str):
-    if not version_str:
-        return
-    meta_path = backup_path + ".version"
-    try:
-        with open(meta_path, "w", encoding="utf-8") as f:
-            f.write(version_str.strip())
-    except Exception as e:
-        print(color(f"  [!] Could not save backup version metadata: {e}", COLOR_YELLOW))
-
-
-def save_backup_hash(backup_path):
-    h = file_hash(backup_path)
-    if h is not None:
-        try:
-            with open(backup_path + ".sha256", "w", encoding="utf-8") as f:
-                f.write(h)
-        except Exception as e:
-            print(color(f"  [!] Could not save backup hash: {e}", COLOR_YELLOW))
-
-
-def verify_backup_hash(backup_path):
-    hash_file = backup_path + ".sha256"
-    if not os.path.exists(hash_file):
-        return None  # нет данных — не проверяем
-    try:
-        with open(hash_file, "r", encoding="utf-8") as f:
-            saved = f.read().strip()
-        return file_hash(backup_path) == saved
-    except Exception:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +337,7 @@ def format_bytes(size_bytes):
 # ---------------------------------------------------------------------------
 
 def _patch_is_google_internal(content):
-    """if(isGoogleInternal) → if(true)"""
+    """if(isGoogleInternal) → if(true) — forces internal Google path bypassing geo/eligibility checks."""
     re_if_internal = re.compile(r"if\(this\.([a-zA-Z_$]+)\.isGoogleInternal\)")
     matches = [m.group(0) for m in re_if_internal.finditer(content)]
     new_content = re_if_internal.sub("if(true)", content)
@@ -394,51 +350,39 @@ def _patch_is_google_internal(content):
     }
 
 
+def _patch_is_google_internal_comma(content):
+    """if(X(),this.Y.isGoogleInternal) → if(X(),true).
+
+    В v1.22 auth service проверяет:
+    if(this.w.resetIsTierGCPTos(),this.t.isGoogleInternal){...}
+    """
+    # Простой поиск конкретного паттерна из scan2 (#32)
+    old = 'if(this.w.resetIsTierGCPTos(),this.t.isGoogleInternal)'
+    new = 'if(this.w.resetIsTierGCPTos(),true)'
+    if old in content:
+        content = content.replace(old, new)
+        return content, {
+            "Name": "comma isGoogleInternal → true (auth)",
+            "Applied": True,
+            "Detail": "Replaced auth service isGoogleInternal check",
+        }
+    return content, {
+        "Name": "comma isGoogleInternal → true (auth)",
+        "Applied": False,
+        "Detail": "pattern not found",
+    }
+
+
 def _patch_onboard_user(content):
-    """onboardUser injection после loadCodeAssist."""
-    # Вариант 1: с немедленно следующим ;const{settings}
-    re_internal_block = re.compile(
-        r"(await\s+this\.([a-zA-Z_$]+)\.loadCodeAssist\(([a-zA-Z_$]+)\))(;const\{settings)"
-    )
-    internal_match = re_internal_block.search(content)
+    """onboardUser injection после loadCodeAssist.
 
-    if internal_match:
-        var_svc = internal_match.group(2)
-        arg_name = internal_match.group(3)
-        injection = (
-            f';try{{await this.{var_svc}.onboardUser("standard-tier",{arg_name})}}'
-            f'catch(_e){{try{{await this.{var_svc}.onboardUser("free-tier",{arg_name})}}catch(_e2){{}}}}'
-        )
-        replacement = internal_match.group(1) + injection + internal_match.group(4)
-        new_content = content.replace(internal_match.group(0), replacement, 1)
-        return new_content, {
-            "Name": "onboardUser injection (internal path)",
-            "Applied": new_content != content,
-            "Detail": f"this.{var_svc}.onboardUser() before refreshUserStatus",
-        }
-
-    # Вариант 2: просто после loadCodeAssist
-    re_load_ca = re.compile(r"(await\s+this\.([a-zA-Z_$]+)\.loadCodeAssist\(([a-zA-Z_$]+)\))")
-    lca_match = re_load_ca.search(content)
-    if lca_match:
-        var_svc = lca_match.group(2)
-        arg_name = lca_match.group(3)
-        injection = (
-            f';try{{await this.{var_svc}.onboardUser("standard-tier",{arg_name})}}'
-            f'catch(_e){{try{{await this.{var_svc}.onboardUser("free-tier",{arg_name})}}catch(_e2){{}}}}'
-        )
-        replacement = lca_match.group(1) + injection
-        new_content = content.replace(lca_match.group(0), replacement, 1)
-        return new_content, {
-            "Name": "onboardUser injection (fallback)",
-            "Applied": new_content != content,
-            "Detail": f"this.{var_svc}.onboardUser() after loadCodeAssist",
-        }
-
+    ОТКЛЮЧЕНО: в v1.22+ onboardUser уже вызывается нативно 3 раза,
+    инъекция дублирует вызов и ломает поток авторизации.
+    """
     return content, {
         "Name": "onboardUser injection",
         "Applied": False,
-        "Detail": "loadCodeAssist not found",
+        "Detail": "Skipped — causes auth hang in v1.22+",
     }
 
 
@@ -465,7 +409,7 @@ def _patch_refresh_user_status(content):
     for rm in reversed(refresh_matches):
         inner_call = rm.group(1)
         arg_r = rm.group(3)
-        wrapped = f'await(async()=>{{try{{return await this.{inner_call}}}catch(_e){{return{{settings:{{}},userTier:"pro",oauthTokenInfo:{arg_r}}}}}}})()'
+        wrapped = f'await(async()=>{{try{{return await this.{inner_call}}}catch(_e){{return{{settings:{{}},userTier:{{id:"pro",description:"Pro"}},oauthTokenInfo:{arg_r}}}}}}})()'
         start, end = rm.start(), rm.end()
         new_content = new_content[:start] + wrapped + new_content[end:]
 
@@ -476,6 +420,29 @@ def _patch_refresh_user_status(content):
     }
 
 
+def _patch_ineligible_screen(content):
+    """Патч экрана ineligible (screen 4) в v1.22+.
+
+    Заменяет spread тернар ...s?{}:{errorType:"ineligible",...}
+    на ...s?{}:{} — ineligible ошибка не отправляется.
+    """
+    old = '...s?{}:{errorType:"ineligible",reason:a,verificationUrl:i}'
+    new = '...s?{}:{}'
+    if old in content:
+        content = content.replace(old, new)
+        return content, {
+            "Name": "ineligible screen bypass (v1.22+)",
+            "Applied": True,
+            "Detail": "Replaced ineligible spread with empty object",
+        }
+
+    return content, {
+        "Name": "ineligible screen bypass",
+        "Applied": False,
+        "Detail": "pattern not found",
+    }
+
+
 def apply_patches(content):
     results = []
     for patch_fn in (
@@ -483,6 +450,21 @@ def apply_patches(content):
         _patch_onboard_user,
         _patch_ide_name,
         _patch_refresh_user_status,
+        _patch_ineligible_screen,
+    ):
+        content, result = patch_fn(content)
+        results.append(result)
+    return content, results
+
+
+def apply_patches_minimal(content):
+    """Для v1.22+: isGoogleInternal (оба паттерна) + ideName + ineligible."""
+    results = []
+    for patch_fn in (
+        _patch_is_google_internal,
+        _patch_is_google_internal_comma,
+        _patch_ide_name,
+        _patch_ineligible_screen,
     ):
         content, result = patch_fn(content)
         results.append(result)
@@ -490,23 +472,11 @@ def apply_patches(content):
 
 
 def is_already_patched(content):
-    # Проверяем конкретные строки, внедрённые патчем
-    return 'ideName:"antigravity-insiders"' in content and "onboardUser(" in content
-
-
-def backup_matches_current_main_js(backup_content, current_content):
-    """Проверяет, соответствует ли backup текущему main.js."""
-    if current_content is None:
-        return False
-
-    if backup_content == current_content:
-        return True
-
-    if is_already_patched(current_content) and not is_already_patched(backup_content):
-        patched_backup_content, _ = apply_patches(backup_content)
-        return patched_backup_content == current_content
-
-    return False
+    # Для v1.22: if(this.X.isGoogleInternal) убран + ideName пропатчен
+    import re
+    has_unpatched = bool(re.search(r'if\(this\.[a-zA-Z_$]+\.isGoogleInternal\)', content))
+    has_ide = 'ideName:"antigravity-insiders"' in content
+    return not has_unpatched and has_ide
 
 
 # ---------------------------------------------------------------------------
@@ -552,18 +522,9 @@ def warn_about_unsafe_backup(main_js_path, installed_version_str=None, current_c
     if not os.path.exists(backup_path):
         return True, False
 
-    installed_version_str = installed_version_str or get_ag_version(main_js_path)
-    installed_version = parse_version_safe(installed_version_str)
-    backup_version_str = load_backup_version(backup_path)
-    backup_version = parse_version_safe(backup_version_str)
     backup_size = file_size(backup_path)
     current_size = file_size(main_js_path)
     warnings = []
-
-    if installed_version and backup_version and backup_version < installed_version:
-        warnings.append(
-            f"backup version {backup_version_str} is older than installed {installed_version_str}"
-        )
 
     try:
         with open(backup_path, "r", encoding="utf-8") as f:
@@ -581,17 +542,6 @@ def warn_about_unsafe_backup(main_js_path, installed_version_str=None, current_c
             f"backup is much smaller than current main.js "
             f"({format_bytes(backup_size)} vs {format_bytes(current_size)})"
         )
-
-    if current_content is not None:
-        if backup_matches_current_main_js(backup_content, current_content):
-            if installed_version_str and not backup_version_str:
-                save_backup_version(backup_path, installed_version_str)
-        elif not is_already_patched(current_content):
-            warnings.append("backup does not match the current unpatched main.js")
-        else:
-            warnings.append(
-                "backup does not match the current (patched) main.js — it may be from a different version"
-            )
 
     if not warnings:
         return True, False
@@ -643,64 +593,31 @@ def do_patch(main_js_path, show_search_line=False):
             print_target_info(main_js_path, show_search_line=show_search_line)
             return
 
+    # --- БЭКАП — копируем файл ДО любых изменений ---
     backup_path = main_js_path + ".bak"
 
-    need_new_backup = True
-    if os.path.exists(backup_path):
-        backup_size = file_size(backup_path)
-        backup_version_str = load_backup_version(backup_path)
-        backup_version = parse_version_safe(backup_version_str)
-        installed_version = parse_version_safe(ver_str)
+    if not os.path.exists(backup_path) and not current_is_patched:
+        print("  [*] Creating backup...")
         try:
-            with open(backup_path, "r", encoding="utf-8") as f:
-                backup_content = f.read()
-            backup_looks_empty = backup_size <= 2048 or len(backup_content.strip()) <= 512
-        except Exception:
-            backup_looks_empty = True
-
-        if backup_looks_empty and current_is_patched:
-            print(color("  [!] Existing backup looks empty or corrupted, but current main.js is already patched - keeping it because a clean backup cannot be rebuilt now.", COLOR_YELLOW))
-            need_new_backup = False
-        elif is_already_patched(backup_content) and current_is_patched:
-            print(color("  [!] Existing backup is itself patched, but current main.js is already patched too - keeping it because a clean backup cannot be rebuilt now.", COLOR_YELLOW))
-            need_new_backup = False
-        elif not current_is_patched and backup_content != content:
-            if installed_version and backup_version and backup_version < installed_version:
-                print(color(f"  [!] Existing backup is from older version {backup_version_str} - replacing it.", COLOR_YELLOW))
-            else:
-                print(color("  [!] Existing backup does not match the current clean main.js - replacing it.", COLOR_YELLOW))
-        elif current_is_patched and not backup_matches_current_main_js(backup_content, content):
-            print(color("  [!] Existing backup does not match the current patched build - keeping it because a clean backup cannot be rebuilt now.", COLOR_YELLOW))
-            need_new_backup = False
-        elif backup_looks_empty:
-            print(color("  [!] Existing backup looks empty or corrupted — replacing it.", COLOR_YELLOW))
-        elif is_already_patched(backup_content):
-            print(color("  [!] Existing backup is itself patched — replacing it with clean copy.", COLOR_YELLOW))
-        else:
-            need_new_backup = False
-            print("  [i] Backup already exists")
-
-    if need_new_backup:
-        if current_is_patched:
-            print(color("  [!] main.js is already patched - skipping backup creation because a clean backup cannot be created from a patched file.", COLOR_YELLOW))
-        else:
-            print("  [*] Creating backup...")
-            try:
-                with open(backup_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                save_backup_version(backup_path, ver_str)
-                save_backup_hash(backup_path)
-                print(f"  [+] Backup: {os.path.basename(backup_path)}")
-            except Exception as e:
-                print(f"  [!] Backup error: {e}")
-                return
+            shutil.copy2(main_js_path, backup_path)
+            print(f"  [+] Backup: {os.path.basename(backup_path)} "
+                  f"({format_bytes(file_size(backup_path))})")
+        except Exception as e:
+            print(f"  [!] Backup error: {e}")
+            return
+    elif os.path.exists(backup_path):
+        print("  [i] Backup already exists — skipping")
+    elif current_is_patched:
+        print(color("  [!] main.js is already patched — no backup needed", COLOR_YELLOW))
 
     hash_before = file_hash(main_js_path)
 
     print("  [*] Applying patches...")
     print()
 
-    new_content, results = apply_patches(content)
+    # Для v1.22+ используем минимальный набор (isGoogleInternal + ideName)
+    # Полные патчи ломают поток авторизации
+    new_content, results = apply_patches_minimal(content)
 
     applied = 0
     for r in results:
@@ -759,10 +676,10 @@ def do_restore(main_js_path, show_search_line=False):
         print(f"  [!] Could not read backup: {e}")
         return
 
-    # Проверка целостности по хэшу
-    hash_ok = verify_backup_hash(backup_path)
-    if hash_ok is False:
-        print(color("  [!] Backup hash mismatch — file may be corrupted!", COLOR_RED))
+    # Проверка размера бэкапа
+    backup_size = file_size(backup_path)
+    if backup_size <= 2048:
+        print(color("  [!] Backup looks too small — may be corrupted!", COLOR_RED))
         if not confirmed("Restore anyway?"):
             print("  [i] Restore cancelled.")
             return
